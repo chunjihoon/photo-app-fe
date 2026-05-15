@@ -1,7 +1,8 @@
 import { Platform } from "react-native";
 import { TestIds } from "react-native-google-mobile-ads";
 
-const USE_TEST_ADS = __DEV__;
+/* 2026.05.14 TestFlight에서도 테스트 광고 노출 여부를 검증하기 위해 임시로 강제 활성화 by June */
+const USE_TEST_ADS = true;
 
 export const AdUnitIds = {
   banner: USE_TEST_ADS
@@ -25,4 +26,3 @@ export const AdUnitIds = {
         ios: "YOUR_REAL_IOS_REWARDED_AD_UNIT_ID",
       })!,
 };
-

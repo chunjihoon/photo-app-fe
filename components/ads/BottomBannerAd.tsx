@@ -28,6 +28,12 @@ export default function BottomBannerAd({
         requestOptions={{
           requestNonPersonalizedAdsOnly: true,
         }}
+        onAdLoaded={() => {
+          console.log("[ADS] banner loaded");
+        }}
+        onAdFailedToLoad={(e) => {
+          console.log("[ADS] banner failed", e);
+        }}
       />
     </View>
   );
