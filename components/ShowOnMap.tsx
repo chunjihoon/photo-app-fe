@@ -859,14 +859,6 @@ export default function MapView({
               L.marker([c.latitude, c.longitude], { icon: customIcon })
                 .addTo(markerLayer)
                 .on('click', () => {
-                  if (c.isCluster && Number(c.count ?? 0) > 1) {
-                    const nextZoom = Math.min(map.getZoom() + 1, 19);
-                    map.setView([c.latitude, c.longitude], nextZoom, {
-                      animate: true,
-                    });
-                    postViewportBounds();
-                    return;
-                  }
                   window.ReactNativeWebView.postMessage(JSON.stringify({
                     type: 'marker_click',
                     sourceUri: c.sourceUri,
@@ -945,6 +937,15 @@ export default function MapView({
           country: data.country,
         });
         const sourceUri = String(data.sourceUri ?? "");
+        if (onOpenPhotoFromMap) {
+          onOpenPhotoFromMap({
+            sourceUri,
+            city: data.city,
+            country: data.country,
+          });
+          return;
+        }
+
         setDetailPlace([data.city, data.country].filter(Boolean).join(", "));
         setDetailTakenAt(
           typeof data.takenAt === "number" && Number.isFinite(data.takenAt)
@@ -972,15 +973,6 @@ export default function MapView({
             setDetailLoading(false);
           }
         })();
-
-        /* 2026.05.12 지도 위 오버레이가 기본이므로 부모 위임 콜백은 보조 경로로만 유지 by June */
-        if (!sourceUri) {
-          onOpenPhotoFromMap?.({
-            sourceUri,
-            city: data.city,
-            country: data.country,
-          });
-        }
       }
     } catch (e) {
       console.error("WebView message parse error", e);

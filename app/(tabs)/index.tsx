@@ -720,6 +720,15 @@ export default function HomeScreen() {
     setLocationSearchPhaseText("Preparing search...");
   }, [clearLocationSearchProgressTimer]);
 
+  const getPsychologicalLocationSearchPercent = useCallback(
+    (elapsedSeconds: number, estimatedSeconds: number) => {
+      const safeEstimatedSeconds = Math.max(estimatedSeconds, 1);
+      const ratio = Math.min(1, elapsedSeconds / safeEstimatedSeconds);
+      return Math.min(99, Math.max(1, Math.round(ratio * 99)));
+    },
+    [],
+  );
+
   const openDeferredLocationFeature = useCallback((entryPoint: DeferredLocationFeatureOpen) => {
     if (!entryPoint) return;
     if (entryPoint === "location-filter") {
@@ -1705,10 +1714,8 @@ export default function HomeScreen() {
       clearLocationSearchProgressTimer();
       locationSearchProgressTimerRef.current = setInterval(() => {
         if (runToken !== locationSearchRunTokenRef.current) return;
-        const elapsedSeconds = Math.max(
-          1,
-          Math.floor((Date.now() - startedAt) / 1000),
-        );
+        const elapsedSeconds = (Date.now() - startedAt) / 1000;
+        /* 2026.06.24 실제 처리 속도와는 무관하게 사용자 체감이 끊기지 않도록 진행률은 심리적 연출값으로 유지 by June
         const timeRatio = elapsedSeconds / Math.max(estimatedSeconds, 1);
         const checkedRatio = processedCount / Math.max(total, 1);
         const blendedRatio = Math.min(
@@ -1719,8 +1726,16 @@ export default function HomeScreen() {
         setLocationSearchProgressPercent((prev) => Math.max(prev, autoPercent));
         if (timeRatio >= 0.5 || checkedRatio >= 0.5) {
           setLocationSearchPhaseText("Resolving cities...");
+        } */
+        const fakePercent = getPsychologicalLocationSearchPercent(
+          elapsedSeconds,
+          estimatedSeconds,
+        );
+        setLocationSearchProgressPercent((prev) => Math.max(prev, fakePercent));
+        if (fakePercent >= 50 || processedCount / Math.max(total, 1) >= 0.5) {
+          setLocationSearchPhaseText("Resolving cities...");
         }
-      }, 1000);
+      }, 500);
 
       const dbPrepared = await loadPreparedPhotosFromDbForLocationSearch(
         currentFilter,
@@ -1841,11 +1856,13 @@ export default function HomeScreen() {
 
         processedCount = Math.min(total, mergedBase.length);
         setLocationSearchProgressChecked(processedCount);
+        /* 2026.06.24 실제 탐색 건수 비율은 내부 검증용으로만 남겨두고 화면에는 심리적 진행률만 반영 by June
         const explicitPercent = Math.min(
           94,
           Math.round((processedCount / Math.max(total, 1)) * 100),
         );
         setLocationSearchProgressPercent((prev) => Math.max(prev, explicitPercent));
+        */
       }
 
       markLoadedBaseRange(currentFilter, true);
@@ -1867,6 +1884,7 @@ export default function HomeScreen() {
       loadPreparedPhotosFromDbForLocationSearch,
       markLoadedBaseRange,
       matchesDateTimeFilter,
+      getPsychologicalLocationSearchPercent,
       progress.total,
       pruneDisplayUriCacheForPhotos,
       refreshFilterProgress,
@@ -4941,7 +4959,7 @@ export default function HomeScreen() {
       const sourceUri = String(payload.sourceUri ?? "");
       if (!sourceUri) return;
 
-      const foundIndex = photosRef.current.findIndex(
+      const foundIndex = photosAllRef.current.findIndex(
         (p) => p.uri === sourceUri,
       );
       if (foundIndex < 0) return;
@@ -4949,12 +4967,12 @@ export default function HomeScreen() {
       swipe_count_ref.current = 0;
       swipe_threshold_fired_ref.current = false;
       setViewerEntryPoint("map");
-      setViewerPhotoUris(photosRef.current.map((photo) => photo.uri));
+      setViewerPhotoUris(photosAllRef.current.map((photo) => photo.uri));
       setViewerIndex(foundIndex);
       setViewerVisible(true);
 
       await resolveViewerDetailUri(sourceUri);
-      await prioritizePhotoLocation(photosRef.current[foundIndex]);
+      await prioritizePhotoLocation(photosAllRef.current[foundIndex]);
     },
     [prioritizePhotoLocation, resolveViewerDetailUri],
   );
@@ -5026,11 +5044,15 @@ export default function HomeScreen() {
         ),
     );
     if (remainingSeconds < 60) {
-      // return `예상 남은 시간: ${remainingSeconds}초`;
+      const displaySeconds =
+        remainingSeconds === 0 && locationSearchProgressPercent < 100
+          ? 1
+          : remainingSeconds;
+      return `예상 남은 시간: ${displaySeconds}초`;
     }
-    // const min = Math.floor(remainingSeconds / 60);
-    // const sec = remainingSeconds % 60;
-    // return `예상 남은 시간: ${min}분 ${sec}초`;
+    const min = Math.floor(remainingSeconds / 60);
+    const sec = remainingSeconds % 60;
+    return `예상 남은 시간: ${min}분 ${sec}초`;
   }, [effectiveLocationSearchEstimatedSeconds, locationSearchProgressPercent]);
 
   useEffect(() => {
