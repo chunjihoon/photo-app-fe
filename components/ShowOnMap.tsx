@@ -44,11 +44,6 @@ type Props = {
   openToken?: number;
   preparingLocations?: boolean;
   preparingMessage?: string;
-  onOpenPhotoFromMap?: (payload: {
-    sourceUri: string;
-    city?: string;
-    country?: string;
-  }) => void;
 };
 
 /* 2026.05.12 이미지 로드 실패 시에도 좌표 마커는 유지하기 위해 공통 placeholder 이미지를 정의 by June
@@ -88,6 +83,12 @@ type DisplayMarkerMode = "representative" | "photo";
 
 type DisplayMarker = {
   sourceUri: string;
+  sourcePhotos: Array<{
+    sourceUri: string;
+    city?: string;
+    country?: string;
+    takenAt?: number | null;
+  }>;
   latitude: number;
   longitude: number;
   markerUri: string;
@@ -120,16 +121,21 @@ export default function MapView({
   openToken = 0,
   preparingLocations = false,
   preparingMessage,
-  onOpenPhotoFromMap,
 }: Props) {
   const { language } = useLanguage();
   const [visible, setVisible] = useState(false);
   const [detailVisible, setDetailVisible] = useState(false);
-  const [detailUri, setDetailUri] = useState<string | null>(null);
+  const [detailUris, setDetailUris] = useState<string[]>([]);
+  const [detailIndex, setDetailIndex] = useState(0);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [detailPlace, setDetailPlace] = useState<string>("");
-  const [detailTakenAt, setDetailTakenAt] = useState<number | null>(null);
-  const [detailSourceUri, setDetailSourceUri] = useState<string | null>(null);
+  const [detailItems, setDetailItems] = useState<
+    Array<{
+      sourceUri: string;
+      city?: string;
+      country?: string;
+      takenAt?: number | null;
+    }>
+  >([]);
   // 2026-03-18 get proper coordinates by yen
   const [coordinates, setCoordinates] = useState<any[]>([]); // store base64 coords
   const [loading, setLoading] = useState(false);
@@ -188,6 +194,21 @@ export default function MapView({
       current.thumbnailUri && current.thumbnailUri !== FALLBACK_MARKER_URI;
     if (candidateHasThumb !== currentHasThumb) return !!candidateHasThumb;
     return String(candidate.sourceUri ?? "") > String(current.sourceUri ?? "");
+  };
+
+  const resolveDetailUri = async (sourceUri: string) => {
+    if (!sourceUri) return sourceUri;
+    try {
+      if (sourceUri.startsWith("ph://")) {
+        const assetId = getAssetIdFromPhUri(sourceUri);
+        if (!assetId) return sourceUri;
+        const info = await MediaLibrary.getAssetInfoAsync(assetId);
+        return info?.localUri ?? info?.uri ?? sourceUri;
+      }
+      return sourceUri;
+    } catch {
+      return sourceUri;
+    }
   };
 
   const displayMarkers = useMemo(() => {
@@ -269,6 +290,19 @@ export default function MapView({
 
         return {
           sourceUri: representative.sourceUri,
+          sourcePhotos: [...items]
+            .sort((left, right) => {
+              const leftTaken = getTakenAtValue(left);
+              const rightTaken = getTakenAtValue(right);
+              if (leftTaken !== rightTaken) return rightTaken - leftTaken;
+              return String(left.sourceUri ?? "").localeCompare(String(right.sourceUri ?? ""));
+            })
+            .map((item) => ({
+              sourceUri: item.sourceUri,
+              city: item.city,
+              country: item.country,
+              takenAt: item.takenAt ?? null,
+            })),
           latitude: representative.latitude,
           longitude: representative.longitude,
           markerUri:
@@ -288,6 +322,14 @@ export default function MapView({
 
     const renderItems = coordinates.map((coord) => ({
       sourceUri: coord.sourceUri,
+      sourcePhotos: [
+        {
+          sourceUri: coord.sourceUri,
+          city: coord.city,
+          country: coord.country,
+          takenAt: coord.takenAt,
+        },
+      ],
       latitude: coord.latitude,
       longitude: coord.longitude,
       markerUri:
@@ -864,7 +906,8 @@ export default function MapView({
                     sourceUri: c.sourceUri,
                     city: c.city,
                     country: c.country,
-                    takenAt: c.takenAt ?? null
+                    takenAt: c.takenAt ?? null,
+                    sourcePhotos: c.sourcePhotos ?? [],
                   }));
                 });
             });
@@ -936,39 +979,47 @@ export default function MapView({
           city: data.city,
           country: data.country,
         });
-        const sourceUri = String(data.sourceUri ?? "");
-        if (onOpenPhotoFromMap) {
-          onOpenPhotoFromMap({
-            sourceUri,
-            city: data.city,
-            country: data.country,
-          });
-          return;
-        }
+        const sourcePhotos = Array.isArray(data.sourcePhotos)
+          ? data.sourcePhotos
+          : [{
+              sourceUri: String(data.sourceUri ?? ""),
+              city: data.city,
+              country: data.country,
+              takenAt:
+                typeof data.takenAt === "number" && Number.isFinite(data.takenAt)
+                  ? data.takenAt
+                  : null,
+            }];
+        const sourceUris = sourcePhotos
+          .map((item: any) => String(item?.sourceUri ?? ""))
+          .filter(Boolean);
+        const detailMeta = sourcePhotos
+          .map((item: any) => ({
+            sourceUri: String(item?.sourceUri ?? ""),
+            city: item?.city,
+            country: item?.country,
+            takenAt:
+              typeof item?.takenAt === "number" && Number.isFinite(item?.takenAt)
+                ? item.takenAt
+                : null,
+          }))
+          .filter((item) => item.sourceUri);
+        if (sourceUris.length === 0) return;
 
-        setDetailPlace([data.city, data.country].filter(Boolean).join(", "));
-        setDetailTakenAt(
-          typeof data.takenAt === "number" && Number.isFinite(data.takenAt)
-            ? data.takenAt
-            : null
-        );
-        setDetailSourceUri(sourceUri);
+        setDetailItems(detailMeta);
+        setDetailIndex(0);
         setDetailVisible(true);
         setDetailLoading(true);
-        setDetailUri(null);
+        setDetailUris([]);
 
         void (async () => {
           try {
-            if (sourceUri.startsWith("ph://")) {
-              const assetId = getAssetIdFromPhUri(sourceUri);
-              if (!assetId) throw new Error("invalid ph uri");
-              const info = await MediaLibrary.getAssetInfoAsync(assetId);
-              setDetailUri(info?.localUri ?? info?.uri ?? sourceUri);
-            } else {
-              setDetailUri(sourceUri);
-            }
+            const resolved = await Promise.all(
+              sourceUris.map((uri) => resolveDetailUri(uri)),
+            );
+            setDetailUris(resolved);
           } catch {
-            setDetailUri(sourceUri);
+            setDetailUris(sourceUris);
           } finally {
             setDetailLoading(false);
           }
@@ -992,11 +1043,12 @@ export default function MapView({
   };
 
   const onPressShare = async () => {
-    if (!detailUri) return;
+    const uri = detailUris[detailIndex] ?? "";
+    if (!uri) return;
     try {
       await Share.open({
-        message: detailPlace ? `Check out this photo! ${detailPlace}` : "Check out this photo!",
-        url: Platform.OS === "android" ? `file://${detailUri}` : detailUri,
+        message: "Check out this photo!",
+        url: Platform.OS === "android" ? `file://${uri}` : uri,
         type: "image/jpeg",
       });
     } catch (err: unknown) {
@@ -1008,14 +1060,15 @@ export default function MapView({
   };
 
   const onPressDelete = () => {
-    if (!detailSourceUri) return;
+    const currentSourceUri = detailItems[detailIndex]?.sourceUri ?? "";
+    if (!currentSourceUri) return;
     Alert.alert("Delete Photo", "Are you sure you want to delete this photo?", [
       { text: "Cancel", style: "cancel" },
       {
         text: "Delete",
         style: "destructive",
         onPress: () => {
-          setCoordinates((prev) => prev.filter((c) => c.sourceUri !== detailSourceUri));
+          setCoordinates((prev) => prev.filter((c) => c.sourceUri !== currentSourceUri));
           setDetailVisible(false);
         },
       },
@@ -1118,18 +1171,29 @@ export default function MapView({
           </View>
 
           {detailVisible && detailLoading ? (
-            <View style={styles.detailLoadingOverlay}>
-              <ActivityIndicator size="large" color="#fff" />
+            <View style={styles.detailLoadingOverlay} pointerEvents="auto">
+              <View style={styles.detailLoadingCard}>
+                <ActivityIndicator size="large" color="#6366F1" />
+                <Text style={styles.detailLoadingText}>Preparing photo...</Text>
+              </View>
             </View>
           ) : null}
           <PhotoDetailViewer
-            visible={detailVisible && !detailLoading && !!detailUri}
-            images={detailUri ? [{ uri: detailUri }] : []}
-            imageIndex={0}
+            visible={detailVisible && !detailLoading && detailUris.length > 0}
+            images={detailUris.map((uri) => ({ uri }))}
+            imageIndex={Math.min(detailIndex, Math.max(detailUris.length - 1, 0))}
+            onImageIndexChange={(index) => {
+              const safeIndex = Math.max(0, Math.min(index, detailUris.length - 1));
+              setDetailIndex(safeIndex);
+            }}
             onRequestClose={() => setDetailVisible(false)}
             showPlayButton={false}
-            dateText={fmtDateTime(detailTakenAt)}
-            locationText={detailPlace}
+            dateText={fmtDateTime(detailItems[detailIndex]?.takenAt ?? null)}
+            locationText={
+              [detailItems[detailIndex]?.city, detailItems[detailIndex]?.country]
+                .filter(Boolean)
+                .join(", ")
+            }
             onPressShare={onPressShare}
             onPressDelete={onPressDelete}
           />
@@ -1174,7 +1238,27 @@ const styles = StyleSheet.create({
     zIndex: 20,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(0,0,0,0.85)",
+    backgroundColor: "transparent",
+  },
+  detailLoadingCard: {
+    minWidth: 220,
+    paddingHorizontal: 22,
+    paddingVertical: 18,
+    borderRadius: 20,
+    backgroundColor: "rgba(255,255,255,0.96)",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 12,
+    shadowColor: "#000",
+    shadowOpacity: 0.16,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 10,
+  },
+  detailLoadingText: {
+    color: "#1F2937",
+    fontSize: 15,
+    fontWeight: "700",
   },
   mapStatusOverlay: {
     flex: 1,

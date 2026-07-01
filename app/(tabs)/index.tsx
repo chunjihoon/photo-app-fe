@@ -41,6 +41,7 @@ import { useSlideshowTime } from "@/components/context/SlideshowTimeContext";
 import { useTheme } from "@/components/context/ThemeContext";
 import { useI18n } from "@/components/context/useI18n";
 import { useUserData } from "@/components/context/UserDataContext";
+import { TranslationKey } from "@/constants/Translations";
 
 import IconPlay from "@/assets/icons/ic_play.svg"; //2026.03.18 Change button UI by June
 
@@ -490,9 +491,8 @@ export default function HomeScreen() {
     useState(0);
   const [locationSearchTargetTotalCount, setLocationSearchTargetTotalCount] =
     useState<number | null>(null);
-  const [locationSearchPhaseText, setLocationSearchPhaseText] = useState(
-    "Preparing search...",
-  );
+  const [locationSearchPhaseText, setLocationSearchPhaseText] =
+    useState<TranslationKey>("locationSearchPreparing");
   const [appStateStatus, setAppStateStatus] = useState<AppStateStatus>(
     AppState.currentState,
   );
@@ -500,6 +500,9 @@ export default function HomeScreen() {
   const locationSearchRunTokenRef = useRef(0);
   const pendingLocationSearchPromptSignatureRef = useRef<string | null>(null);
   const locationSearchProgressTimerRef = useRef<ReturnType<typeof setInterval> | null>(
+    null,
+  );
+  const locationSearchCompletionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
   const reloadPhotosForFilterRef = useRef<() => Promise<void>>(async () => {});
@@ -674,7 +677,7 @@ export default function HomeScreen() {
   const locationSearchTargetCountLabel = useMemo(
     () =>
       locationSearchTargetTotalCount === null
-        ? "N"
+        ? "30+"
         : locationSearchTargetTotalCount.toLocaleString(),
     [locationSearchTargetTotalCount],
   );
@@ -691,17 +694,63 @@ export default function HomeScreen() {
     [],
   );
 
-  const currentEstimatedLocationSearchSeconds = useMemo(
-    () =>
-      estimateLocationSearchSeconds(
+  const estimateIncrementalLocationSearchSeconds = useCallback(
+    (currentFilter: FilterState) => {
+      const fallbackEstimate = estimateLocationSearchSeconds(
         currentSearchTargetCount,
         currentDateRangeDayCount,
-      ),
+      );
+      const previousBaseFilter = lastLoadedBaseFilterRef.current;
+      const loadedBaseCount = photosAllRef.current.length;
+
+      if (!previousBaseFilter || loadedBaseCount <= 0) {
+        return fallbackEstimate;
+      }
+
+      const previousStartMs = dayStartMs(previousBaseFilter.dateStart);
+      const previousEndNextMs = dayEndNextMs(previousBaseFilter.dateEnd);
+      const currentStartMs = dayStartMs(currentFilter.dateStart);
+      const currentEndNextMs = dayEndNextMs(currentFilter.dateEnd);
+      const overlaps =
+        previousEndNextMs > currentStartMs && previousStartMs < currentEndNextMs;
+
+      if (!overlaps) {
+        return fallbackEstimate;
+      }
+
+      const previousContainsCurrent =
+        previousStartMs <= currentStartMs && previousEndNextMs >= currentEndNextMs;
+
+      if (previousContainsCurrent) {
+        return Math.max(
+          4,
+          Math.min(10, Math.round(Math.max(4, fallbackEstimate * 0.18))),
+        );
+      }
+
+      const currentRangeMs = Math.max(1, currentEndNextMs - currentStartMs);
+      const overlapStartMs = Math.max(previousStartMs, currentStartMs);
+      const overlapEndNextMs = Math.min(previousEndNextMs, currentEndNextMs);
+      const overlapMs = Math.max(0, overlapEndNextMs - overlapStartMs);
+      const reuseRatio = Math.min(1, Math.max(0, overlapMs / currentRangeMs));
+      const newWorkRatio = Math.max(0.1, 1 - reuseRatio);
+      const estimated = Math.round(
+        fallbackEstimate * newWorkRatio,
+      );
+      return Math.max(4, Math.min(fallbackEstimate, estimated));
+    },
     [
       currentDateRangeDayCount,
       currentSearchTargetCount,
+      dayEndNextMs,
+      dayStartMs,
       estimateLocationSearchSeconds,
     ],
+  );
+
+  const currentEstimatedLocationSearchSeconds = useMemo(
+    () => estimateIncrementalLocationSearchSeconds(filter),
+    [estimateIncrementalLocationSearchSeconds, filter],
   );
 
   const clearLocationSearchProgressTimer = useCallback(() => {
@@ -711,14 +760,101 @@ export default function HomeScreen() {
     }
   }, []);
 
+  const clearLocationSearchCompletionTimer = useCallback(() => {
+    if (locationSearchCompletionTimerRef.current) {
+      clearTimeout(locationSearchCompletionTimerRef.current);
+      locationSearchCompletionTimerRef.current = null;
+    }
+  }, []);
+
+  const locationSearchPhaseLabels = useMemo(
+    () => ({
+      preparing: "locationSearchPreparing",
+      permission: "locationSearchPermission",
+      target: "locationSearchTarget",
+      db: "locationSearchDb",
+      sort: "locationSearchSort",
+      enrich: "locationSearchEnrich",
+      thumbnail: "locationSearchThumbnail",
+      apply: "locationSearchApply",
+    }) as const,
+    [],
+  );
+
+  const locationSearchPhaseShownAtRef = useRef(0);
+  const showLocationSearchPhaseText = useCallback(
+    async (nextPhase: TranslationKey) => {
+      const minimumVisibleMs = 140;
+      const elapsedMs = Date.now() - locationSearchPhaseShownAtRef.current;
+      if (locationSearchPhaseShownAtRef.current > 0 && elapsedMs < minimumVisibleMs) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, minimumVisibleMs - elapsedMs),
+        );
+      }
+      locationSearchPhaseShownAtRef.current = Date.now();
+      setLocationSearchPhaseText(nextPhase);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    },
+    [],
+  );
+
   const resetLocationSearchProgress = useCallback(() => {
     clearLocationSearchProgressTimer();
+    clearLocationSearchCompletionTimer();
+    locationSearchPhaseShownAtRef.current = Date.now();
     setLocationSearchProgressPercent(0);
     setLocationSearchProgressChecked(0);
     setLocationSearchProgressTotal(0);
     setLocationSearchEstimatedSeconds(0);
-    setLocationSearchPhaseText("Preparing search...");
-  }, [clearLocationSearchProgressTimer]);
+    setLocationSearchPhaseText(locationSearchPhaseLabels.preparing);
+  }, [
+    clearLocationSearchCompletionTimer,
+    clearLocationSearchProgressTimer,
+    locationSearchPhaseLabels.preparing,
+  ]);
+
+  const animateLocationSearchProgressToComplete = useCallback(
+    async (runToken: number) => {
+      clearLocationSearchCompletionTimer();
+      clearLocationSearchProgressTimer();
+
+      const startPercent = Math.max(0, Math.min(99, locationSearchProgressPercent));
+      if (startPercent >= 100) return;
+
+      const durationMs = Math.max(280, Math.min(900, 180 + (100 - startPercent) * 14));
+      const startedAt = Date.now();
+
+      await new Promise<void>((resolve) => {
+        const tick = () => {
+          if (runToken !== locationSearchRunTokenRef.current) {
+            resolve();
+            return;
+          }
+
+          const elapsedMs = Date.now() - startedAt;
+          const progress = Math.min(1, elapsedMs / durationMs);
+          const eased = 1 - Math.pow(1 - progress, 3);
+          const nextPercent = Math.round(startPercent + (100 - startPercent) * eased);
+          setLocationSearchProgressPercent((prev) => Math.max(prev, nextPercent));
+
+          if (nextPercent >= 100 || progress >= 1) {
+            setLocationSearchProgressPercent(100);
+            resolve();
+            return;
+          }
+
+          locationSearchCompletionTimerRef.current = setTimeout(tick, 40);
+        };
+
+        tick();
+      });
+    },
+    [
+      clearLocationSearchCompletionTimer,
+      clearLocationSearchProgressTimer,
+      locationSearchProgressPercent,
+    ],
+  );
 
   const getPsychologicalLocationSearchPercent = useCallback(
     (elapsedSeconds: number, estimatedSeconds: number) => {
@@ -1709,7 +1845,7 @@ export default function HomeScreen() {
       setLocationSearchEstimatedSeconds(estimatedSeconds);
       setLocationSearchProgressChecked(processedCount);
       setLocationSearchProgressPercent(0);
-      setLocationSearchPhaseText("Checking coordinates...");
+      await showLocationSearchPhaseText(locationSearchPhaseLabels.db);
 
       clearLocationSearchProgressTimer();
       locationSearchProgressTimerRef.current = setInterval(() => {
@@ -1724,17 +1860,12 @@ export default function HomeScreen() {
         );
         const autoPercent = Math.round(blendedRatio * 100);
         setLocationSearchProgressPercent((prev) => Math.max(prev, autoPercent));
-        if (timeRatio >= 0.5 || checkedRatio >= 0.5) {
-          setLocationSearchPhaseText("Resolving cities...");
-        } */
+        */
         const fakePercent = getPsychologicalLocationSearchPercent(
           elapsedSeconds,
           estimatedSeconds,
         );
         setLocationSearchProgressPercent((prev) => Math.max(prev, fakePercent));
-        if (fakePercent >= 50 || processedCount / Math.max(total, 1) >= 0.5) {
-          setLocationSearchPhaseText("Resolving cities...");
-        }
       }, 500);
 
       const dbPrepared = await loadPreparedPhotosFromDbForLocationSearch(
@@ -1743,6 +1874,7 @@ export default function HomeScreen() {
       if (runToken !== locationSearchRunTokenRef.current) return;
 
       if (dbPrepared.isIndexComplete && dbPrepared.isCacheHit) {
+        await showLocationSearchPhaseText(locationSearchPhaseLabels.sort);
         total = Math.max(total, dbPrepared.totalCount, dbPrepared.photos.length);
         processedCount = dbPrepared.photos.length;
         setLocationSearchTargetTotalCount(
@@ -1751,12 +1883,14 @@ export default function HomeScreen() {
         setLocationSearchProgressTotal(total);
         setLocationSearchProgressChecked(processedCount);
 
+        await showLocationSearchPhaseText(locationSearchPhaseLabels.thumbnail);
         await hydratePersistedDisplayUriCache(
           dbPrepared.photos,
           "location-search-db",
         );
         if (runToken !== locationSearchRunTokenRef.current) return;
 
+        await showLocationSearchPhaseText(locationSearchPhaseLabels.enrich);
         setPhotosAll(dbPrepared.photos);
         setPhotos(deriveVisiblePhotos(dbPrepared.photos, filterRef.current));
         photosAllRef.current = dbPrepared.photos;
@@ -1777,12 +1911,13 @@ export default function HomeScreen() {
         setLocationSearchProgressTotal(
           Math.max(total, photosAllRef.current.length),
         );
-        setLocationSearchPhaseText("Resolving cities...");
+        await showLocationSearchPhaseText(locationSearchPhaseLabels.apply);
         markLoadedBaseRange(currentFilter, true);
         return;
       }
 
       if (photosAllRef.current.length > 0) {
+        await showLocationSearchPhaseText(locationSearchPhaseLabels.enrich);
         await ensureVisiblePhotosLocationReady();
         if (runToken !== locationSearchRunTokenRef.current) return;
         processedCount = Math.max(processedCount, photosAllRef.current.length);
@@ -1792,7 +1927,7 @@ export default function HomeScreen() {
       while (nextPage) {
         if (runToken !== locationSearchRunTokenRef.current) return;
 
-        setLocationSearchPhaseText("Checking coordinates...");
+        await showLocationSearchPhaseText(locationSearchPhaseLabels.target);
         const result = await fetchAssetsPage({
           after: cursor,
           first: FETCH_PAGE_SIZE,
@@ -1807,11 +1942,12 @@ export default function HomeScreen() {
           matchesDateTimeFilter(asset, currentFilter),
         );
 
+        await showLocationSearchPhaseText(locationSearchPhaseLabels.enrich);
         let photosChunk = await hydrateAssetsToPhotos(assets, {
           enrichLocationOnAndroid: true,
         });
 
-        setLocationSearchPhaseText("Resolving cities...");
+        await showLocationSearchPhaseText(locationSearchPhaseLabels.enrich);
         photosChunk = await imagesWithLocation(photosChunk, {
           maxLookups: photosChunk.length,
           precision: 2,
@@ -1838,9 +1974,12 @@ export default function HomeScreen() {
                 : Number.MIN_SAFE_INTEGER;
             return bTime - aTime;
           });
+        await showLocationSearchPhaseText(locationSearchPhaseLabels.sort);
         const nextVisible = deriveVisiblePhotos(mergedBase, filterRef.current);
 
+        await showLocationSearchPhaseText(locationSearchPhaseLabels.thumbnail);
         await hydratePersistedDisplayUriCache(photosChunk, "location-search");
+        await showLocationSearchPhaseText(locationSearchPhaseLabels.apply);
         setPhotosAll(mergedBase);
         setPhotos(nextVisible);
         photosAllRef.current = mergedBase;
@@ -1885,37 +2024,54 @@ export default function HomeScreen() {
       markLoadedBaseRange,
       matchesDateTimeFilter,
       getPsychologicalLocationSearchPercent,
+      locationSearchPhaseLabels.apply,
+      locationSearchPhaseLabels.db,
+      locationSearchPhaseLabels.enrich,
+      locationSearchPhaseLabels.sort,
+      locationSearchPhaseLabels.target,
+      locationSearchPhaseLabels.thumbnail,
       progress.total,
       pruneDisplayUriCacheForPhotos,
       refreshFilterProgress,
+      showLocationSearchPhaseText,
     ],
   );
 
   const finalizeLocationSearchPreparation = useCallback(
     (entryPoint: DeferredLocationFeatureOpen | null) => {
-      clearLocationSearchProgressTimer();
-      setLocationSearchProgressChecked(locationSearchProgressTotal || currentSearchTargetCount);
-      setLocationSearchProgressPercent(100);
-      setLocationSearchPhaseText("Completed");
-      locationSearchResumeSignatureRef.current = null;
-      lastPreparedLocationSearchSignatureRef.current = currentDateTimeFilterSignature;
-      lastDeclinedLocationSearchSignatureRef.current = null;
-      setLocationSearchWorkflowStatus("completed");
-      setTimeout(() => {
-        setLocationSearchWorkflowStatus("idle");
-        openDeferredLocationFeature(entryPoint);
-        setDeferredLocationFeatureOpen(null);
-        setLocationSearchEntryPoint(null);
-        resetLocationSearchProgress();
-      }, 180);
+      void (async () => {
+        const runToken = locationSearchRunTokenRef.current;
+        await animateLocationSearchProgressToComplete(runToken);
+        if (runToken !== locationSearchRunTokenRef.current) return;
+
+        setLocationSearchProgressChecked(
+          locationSearchProgressTotal || currentSearchTargetCount,
+        );
+        setLocationSearchProgressPercent(100);
+        void showLocationSearchPhaseText(locationSearchPhaseLabels.apply);
+        locationSearchResumeSignatureRef.current = null;
+        lastPreparedLocationSearchSignatureRef.current = currentDateTimeFilterSignature;
+        lastDeclinedLocationSearchSignatureRef.current = null;
+        clearLocationSearchCompletionTimer();
+        locationSearchCompletionTimerRef.current = setTimeout(() => {
+          setLocationSearchWorkflowStatus("idle");
+          openDeferredLocationFeature(entryPoint);
+          setDeferredLocationFeatureOpen(null);
+          setLocationSearchEntryPoint(null);
+          resetLocationSearchProgress();
+        }, 180);
+      })();
     },
     [
-      clearLocationSearchProgressTimer,
+      animateLocationSearchProgressToComplete,
+      clearLocationSearchCompletionTimer,
       currentDateTimeFilterSignature,
       currentSearchTargetCount,
       locationSearchProgressTotal,
+      locationSearchPhaseLabels.apply,
       openDeferredLocationFeature,
       resetLocationSearchProgress,
+      showLocationSearchPhaseText,
     ],
   );
 
@@ -2701,6 +2857,7 @@ export default function HomeScreen() {
     async (currentFilter: FilterState, limit: number, offset: number = 0) => {
       /* 2026.04.22 DB 날짜/시간 조회 지연을 계측해 MediaLibrary fallback 대비 성능 차이를 수치화하기 위해 타이머를 추가 by June */
       const dbLoadStartedAt = Date.now();
+      await showLocationSearchPhaseText(locationSearchPhaseLabels.db);
       const hasLocationFilter =
         currentFilter.countries.length > 0 || currentFilter.cities.length > 0;
 
@@ -2787,6 +2944,7 @@ export default function HomeScreen() {
 
       const dbMapped = dedupePhotosByUri(mapDbRowsToPhotos(trimmedRows));
       /* 2026.04.15 DB 조회 함수는 필터링/정렬만 담당하고 URI 정규화는 실제 노출 개수 확정 후 호출하도록 분리해 장기 범위 성능을 개선하기 위해 수정 by June */
+      await showLocationSearchPhaseText(locationSearchPhaseLabels.sort);
       const photosFromDb = sortPhotosForDisplay(dbMapped);
 
       /* 2026.04.22 인덱싱 미완료 상태에서 DB 결과가 비어 있으면 MediaLibrary fallback을 허용해 false-empty를 방지하기 위해 가드 추가 by June */
@@ -2841,8 +2999,11 @@ export default function HomeScreen() {
       dayEndNextMs,
       dayStartMs,
       dedupePhotosByUri,
+      locationSearchPhaseLabels.db,
+      locationSearchPhaseLabels.sort,
       mapDbRowsToPhotos,
       sortPhotosForDisplay,
+      showLocationSearchPhaseText,
     ],
   );
 
@@ -2882,6 +3043,7 @@ export default function HomeScreen() {
       };
     },
     [
+      EMPTY_DEFAULT_MESSAGE,
       buildBaseDateTimeFilter,
       dayEndNextMs,
       dayStartMs,
@@ -2896,6 +3058,7 @@ export default function HomeScreen() {
       currentFilter: FilterState,
       mode: "initial" | "filter-reset" | "append",
     ) => {
+      await showLocationSearchPhaseText(locationSearchPhaseLabels.target);
       const collected: Photo[] = [];
       let cursor: string | null = null;
       let nextPage = true;
@@ -2913,6 +3076,7 @@ export default function HomeScreen() {
         const assets = (result.assets ?? []).filter((asset) =>
           matchesDateTimeFilter(asset, currentFilter),
         );
+        await showLocationSearchPhaseText(locationSearchPhaseLabels.enrich);
         const needsLocation = shouldUseGeocoding(currentFilter, mode);
         let photosChunk = await hydrateAssetsToPhotos(assets, {
           enrichLocationOnAndroid: needsLocation,
@@ -2931,6 +3095,7 @@ export default function HomeScreen() {
         nextPage = result.hasNextPage;
       }
 
+      await showLocationSearchPhaseText(locationSearchPhaseLabels.sort);
       return {
         photos: sortPhotosForDisplay(dedupePhotosByUri(collected)),
         totalCount,
@@ -2943,9 +3108,13 @@ export default function HomeScreen() {
       fetchAssetsPage,
       hydrateAssetsToPhotos,
       imagesWithLocation,
+      locationSearchPhaseLabels.enrich,
+      locationSearchPhaseLabels.sort,
+      locationSearchPhaseLabels.target,
       matchesDateTimeFilter,
       shouldUseGeocoding,
       sortPhotosForDisplay,
+      showLocationSearchPhaseText,
     ],
   );
 
@@ -2954,8 +3123,10 @@ export default function HomeScreen() {
       const hasLocationFilter =
         currentFilter.countries.length > 0 || currentFilter.cities.length > 0;
       if (!hasLocationFilter) {
+        await showLocationSearchPhaseText(locationSearchPhaseLabels.db);
         const dbLoaded = await loadAllPhotosFromDbForDateTime(currentFilter);
         if (dbLoaded.isCacheHit) {
+          await showLocationSearchPhaseText(locationSearchPhaseLabels.sort);
           return {
             photos: dbLoaded.photos,
             totalCount: dbLoaded.totalCount,
@@ -2964,6 +3135,7 @@ export default function HomeScreen() {
         }
       }
 
+      await showLocationSearchPhaseText(locationSearchPhaseLabels.target);
       const mediaLoaded = await collectAllPhotosForDateTimeRange(currentFilter, mode);
       return {
         photos: mediaLoaded.photos,
@@ -2971,12 +3143,20 @@ export default function HomeScreen() {
         source: "medialibrary" as const,
       };
     },
-    [collectAllPhotosForDateTimeRange, loadAllPhotosFromDbForDateTime],
+    [
+      collectAllPhotosForDateTimeRange,
+      loadAllPhotosFromDbForDateTime,
+      locationSearchPhaseLabels.db,
+      locationSearchPhaseLabels.sort,
+      locationSearchPhaseLabels.target,
+      showLocationSearchPhaseText,
+    ],
   );
 
   /* 2026.06.11 완전 로드된 coverage를 여러 조각까지 재사용하고, 빠진 구간만 보충해서 이어붙이도록 확장 by June */
   const tryReuseLoadedBaseRangeFromMemory = useCallback(
     async (currentFilter: FilterState) => {
+      await showLocationSearchPhaseText(locationSearchPhaseLabels.target);
       const requestedStartMs = dayStartMs(currentFilter.dateStart);
       const requestedEndNextMs = dayEndNextMs(currentFilter.dateEnd);
 
@@ -3055,11 +3235,13 @@ export default function HomeScreen() {
         gapPhotos.push(...gapResult.photos);
       }
 
+      await showLocationSearchPhaseText(locationSearchPhaseLabels.sort);
       const nextBase = sortPhotosForDisplay(
         dedupePhotosByUri([...reusedPhotos, ...gapPhotos]),
       );
       const nextVisible = deriveVisiblePhotos(nextBase, currentFilter);
 
+      await showLocationSearchPhaseText(locationSearchPhaseLabels.thumbnail);
       setCurrentDataSource(gapSource);
       setPhotosAll(nextBase);
       setPhotos(nextVisible);
@@ -3070,6 +3252,7 @@ export default function HomeScreen() {
       setHasNextPage(false);
       dbDateTimePagingRef.current = { enabled: false, offset: 0 };
       setLocationSearchTargetTotalCount(nextVisible.length);
+      await showLocationSearchPhaseText(locationSearchPhaseLabels.apply);
       void refreshFilterProgress(currentFilter, nextVisible.length);
       markLoadedBaseRange(currentFilter, true);
       setEmptyMessage(nextVisible.length === 0 ? EMPTY_DEFAULT_MESSAGE : null);
@@ -3082,11 +3265,16 @@ export default function HomeScreen() {
       dedupePhotosByUri,
       deriveVisiblePhotos,
       isDateTimeCoverageTimeCompatible,
+      locationSearchPhaseLabels.apply,
+      locationSearchPhaseLabels.sort,
+      locationSearchPhaseLabels.target,
+      locationSearchPhaseLabels.thumbnail,
       loadPhotosForDateTimeSegment,
       markLoadedBaseRange,
       pruneDisplayUriCacheForPhotos,
       refreshFilterProgress,
       sortPhotosForDisplay,
+      showLocationSearchPhaseText,
     ],
   );
 
@@ -3094,7 +3282,41 @@ export default function HomeScreen() {
     async (currentFilter: FilterState) => {
       const previousBaseFilter = lastLoadedBaseFilterRef.current;
       if (!previousBaseFilter) return false;
-      if (!lastLoadedBaseFullyLoadedRef.current) return false;
+
+      const previousContainsCurrent =
+        previousBaseFilter.dateStart <= currentFilter.dateStart &&
+        previousBaseFilter.dateEnd >= currentFilter.dateEnd;
+
+      if (previousContainsCurrent && photosAllRef.current.length > 0) {
+        const nextBase = photosAllRef.current.filter((photo) => {
+          const ts = photo.takenAt;
+          if (typeof ts !== "number" || !Number.isFinite(ts)) return true;
+          return (
+            ts >= dayStartMs(currentFilter.dateStart) &&
+            ts < dayEndNextMs(currentFilter.dateEnd) &&
+            inTimeWindow(ts, currentFilter.timeStart, currentFilter.timeEnd)
+          );
+        });
+        const nextVisible = deriveVisiblePhotos(nextBase, currentFilter);
+
+        await showLocationSearchPhaseText(locationSearchPhaseLabels.apply);
+        setCurrentDataSource("db");
+        setPhotosAll(nextBase);
+        setPhotos(nextVisible);
+        photosAllRef.current = nextBase;
+        photosRef.current = nextVisible;
+        pruneDisplayUriCacheForPhotos(nextBase);
+        setEndCursor(null);
+        setHasNextPage(false);
+        dbDateTimePagingRef.current = { enabled: false, offset: 0 };
+        setLocationSearchTargetTotalCount(nextBase.length);
+        void refreshFilterProgress(currentFilter, nextVisible.length);
+        markLoadedBaseRange(currentFilter, true);
+        setEmptyMessage(nextVisible.length === 0 ? EMPTY_DEFAULT_MESSAGE : null);
+        return true;
+      }
+
+      await showLocationSearchPhaseText(locationSearchPhaseLabels.target);
       if (
         photosAllRef.current.length <= 0 ||
         photosAllRef.current.length > INCREMENTAL_DATE_RELOAD_MAX_BASE_SIZE
@@ -3169,7 +3391,9 @@ export default function HomeScreen() {
       );
       const nextVisible = deriveVisiblePhotos(nextBase, currentFilter);
 
+      await showLocationSearchPhaseText(locationSearchPhaseLabels.thumbnail);
       await hydratePersistedDisplayUriCache(nextBase, "incremental-date-reload");
+      await showLocationSearchPhaseText(locationSearchPhaseLabels.apply);
       setPhotosAll(nextBase);
       setPhotos(nextVisible);
       photosAllRef.current = nextBase;
@@ -3194,11 +3418,15 @@ export default function HomeScreen() {
       deriveVisiblePhotos,
       diffDaysDateOnly,
       hydratePersistedDisplayUriCache,
+      locationSearchPhaseLabels.apply,
+      locationSearchPhaseLabels.target,
+      locationSearchPhaseLabels.thumbnail,
       loadPhotosForDateTimeSegment,
       markLoadedBaseRange,
       pruneDisplayUriCacheForPhotos,
       refreshFilterProgress,
       sortPhotosForDisplay,
+      showLocationSearchPhaseText,
     ],
   );
 
@@ -3295,6 +3523,7 @@ export default function HomeScreen() {
     startCursor?: string | null;
     mode: "initial" | "background" | "append" | "filter-reset";
   }) => {
+    await showLocationSearchPhaseText(locationSearchPhaseLabels.target);
     /* 2026.04.22 MediaLibrary 기반 수집 경로의 전체 지연을 계측해 DB 경로 대비 잔여 병목을 비교하기 위해 타이머를 추가 by June */
     const collectStartedAt = Date.now();
     const pageStartedAt = Date.now();
@@ -3314,6 +3543,7 @@ export default function HomeScreen() {
     /* 2026.05.26 위치 필터가 활성일 때만 Android에서 per-asset location 보강을 활성화 — 그래야
        Android에서 country/city 필터링이 실제로 동작 by yen */
     const needsLocation = shouldUseGeocoding(currentFilter, mode);
+    await showLocationSearchPhaseText(locationSearchPhaseLabels.enrich);
     let photosChunk = await hydrateAssetsToPhotos(dateTimeMatched, {
       enrichLocationOnAndroid: needsLocation,
     });
@@ -3359,6 +3589,12 @@ export default function HomeScreen() {
     dayStartMs,
     hydrateAssetsToPhotos,
     imagesWithLocation,
+    locationSearchPhaseLabels.enrich,
+    locationSearchPhaseLabels.target,
+    shouldUseGeocoding,
+    matchesDateTimeFilter,
+    fetchAssetsPage,
+    showLocationSearchPhaseText,
   ]);
 
   /** 날짜 범위 전용 fallback. 현재는 MediaLibrary 자체 createdAfter/createdBefore 질의를 사용해
@@ -3681,6 +3917,7 @@ export default function HomeScreen() {
     let reloadPath: "db" | "medialibrary" | "permission_denied" | "skipped" =
       "skipped";
 
+    await showLocationSearchPhaseText(locationSearchPhaseLabels.permission);
     const ok = await ensurePhotoPermission();
     if (!ok) {
       reloadPath = "permission_denied";
@@ -3716,23 +3953,27 @@ export default function HomeScreen() {
     });
 
     try {
+      await showLocationSearchPhaseText(locationSearchPhaseLabels.target);
       const reusedLoadedBase = await tryReuseLoadedBaseRangeFromMemory(
         currentFilter,
       );
       if (reusedLoadedBase) {
         reloadPath = "db";
+        await showLocationSearchPhaseText(locationSearchPhaseLabels.apply);
         setEmptyMessage(
           photosRef.current.length === 0 ? EMPTY_DEFAULT_MESSAGE : null,
         );
         return;
       }
 
+      await showLocationSearchPhaseText(locationSearchPhaseLabels.db);
       const incrementalApplied = await tryApplyIncrementalDateRangeReload(
         currentFilter,
       );
       if (incrementalApplied) {
         reloadPath = "db";
         setCurrentDataSource("db");
+        await showLocationSearchPhaseText(locationSearchPhaseLabels.apply);
         setEmptyMessage(
           photosRef.current.length === 0 ? EMPTY_DEFAULT_MESSAGE : null,
         );
@@ -3754,6 +3995,7 @@ export default function HomeScreen() {
         reloadPath = "db";
         setCurrentDataSource("db");
         sortedBase = dbResult.photos.slice(0, FILTER_RESET_TARGET_COUNT);
+        await showLocationSearchPhaseText(locationSearchPhaseLabels.sort);
         sorted = deriveVisiblePhotos(sortedBase, currentFilter);
         nextHasPage = dbResult.dbHasMore || !dbResult.isIndexComplete;
         dbDateTimePagingRef.current = {
@@ -3766,6 +4008,7 @@ export default function HomeScreen() {
       } else {
         reloadPath = "medialibrary";
         setCurrentDataSource("medialibrary");
+        await showLocationSearchPhaseText(locationSearchPhaseLabels.target);
         const result = await collectPhotosForTarget({
           currentFilter,
           targetCount: FILTER_RESET_TARGET_COUNT,
@@ -3798,7 +4041,9 @@ export default function HomeScreen() {
         return;
       }
 
+      await showLocationSearchPhaseText(locationSearchPhaseLabels.thumbnail);
       await hydratePersistedDisplayUriCache(sortedBase, "filter-medialibrary");
+      await showLocationSearchPhaseText(locationSearchPhaseLabels.apply);
       setPhotos(sorted);
       setPhotosAll(sortedBase);
       pruneDisplayUriCacheForPhotos(sortedBase);
@@ -3853,6 +4098,7 @@ export default function HomeScreen() {
       sortPhotosForDisplay,
       tryApplyIncrementalDateRangeReload,
       tryLoadPhotosFromDbForDateTime,
+      showLocationSearchPhaseText,
     ]);
 
   /** append/background 공용 로드 처리 */
@@ -4953,30 +5199,6 @@ export default function HomeScreen() {
     </View>;
     console.log("Show on map, photos: ", photos.length);
   };
-  /* 2026.05.12 지도 마커 탭 시 동일 공통 상세 뷰어를 열되 지도 컨텍스트를 유지하기 위해 index 매칭 기반 오픈 핸들러를 추가 by June */
-  const handleOpenPhotoFromMap = useCallback(
-    async (payload: { sourceUri: string; city?: string; country?: string }) => {
-      const sourceUri = String(payload.sourceUri ?? "");
-      if (!sourceUri) return;
-
-      const foundIndex = photosAllRef.current.findIndex(
-        (p) => p.uri === sourceUri,
-      );
-      if (foundIndex < 0) return;
-
-      swipe_count_ref.current = 0;
-      swipe_threshold_fired_ref.current = false;
-      setViewerEntryPoint("map");
-      setViewerPhotoUris(photosAllRef.current.map((photo) => photo.uri));
-      setViewerIndex(foundIndex);
-      setViewerVisible(true);
-
-      await resolveViewerDetailUri(sourceUri);
-      await prioritizePhotoLocation(photosAllRef.current[foundIndex]);
-    },
-    [prioritizePhotoLocation, resolveViewerDetailUri],
-  );
-
   const edges = ["bottom", "left", "right"];
   if (Platform.OS === "ios") {
     edges.push("top"); // iOS는 top 추가해야 UI 안깨짐
@@ -5029,12 +5251,51 @@ export default function HomeScreen() {
       : currentEstimatedLocationSearchSeconds;
   const locationSearchEstimatedMinutesLabel = useMemo(() => {
     if (effectiveLocationSearchEstimatedSeconds < 60) {
-      return `${effectiveLocationSearchEstimatedSeconds}초`;
+      return t("locationSearchEstimatedTimeShort")
+        .replace("{seconds}", `${effectiveLocationSearchEstimatedSeconds}`)
+        .trim();
     }
     const minutes = Math.floor(effectiveLocationSearchEstimatedSeconds / 60);
     const seconds = effectiveLocationSearchEstimatedSeconds % 60;
-    return `${minutes}분 ${seconds}초`;
-  }, [effectiveLocationSearchEstimatedSeconds]);
+    return t("locationSearchEstimatedTimeLong")
+      .replace("{minutes}", `${minutes}`)
+      .replace("{seconds}", `${seconds}`)
+      .trim();
+  }, [effectiveLocationSearchEstimatedSeconds, t]);
+  const locationSearchExtendedFeatureTitle = useMemo(
+    () => t("locationSearchExtendedFeatureTitle"),
+    [t],
+  );
+  const locationSearchExtendedFeatureBody = useMemo(
+    () => t("locationSearchExtendedFeatureBody"),
+    [t],
+  );
+  const locationSearchReduceButtonLabel = useMemo(
+    () => t("locationSearchReduceTo31Days"),
+    [t],
+  );
+  const locationSearchLaterButtonLabel = useMemo(
+    () => t("locationSearchLater"),
+    [t],
+  );
+  const locationSearchSearchPromptTitle = useMemo(
+    () =>
+      t("locationSearchSearchPromptTitle")
+        .replace("{count}", locationSearchTargetCountLabel)
+        .trim(),
+    [locationSearchTargetCountLabel, t],
+  );
+  const locationSearchSearchPromptBody = useMemo(
+    () =>
+      t("locationSearchSearchPromptBody")
+        .replace("{time}", locationSearchEstimatedMinutesLabel)
+        .trim(),
+    [locationSearchEstimatedMinutesLabel, t],
+  );
+  const locationSearchSearchPromptHint = useMemo(
+    () => t("locationSearchSearchPromptHint"),
+    [t],
+  );
   const locationSearchRemainingLabel = useMemo(() => {
     const remainingSeconds = Math.max(
       0,
@@ -5048,12 +5309,21 @@ export default function HomeScreen() {
         remainingSeconds === 0 && locationSearchProgressPercent < 100
           ? 1
           : remainingSeconds;
-      return `예상 남은 시간: ${displaySeconds}초`;
+      // return t("locationSearchRemainingTimeShort")
+      //   .replace("{seconds}", `${displaySeconds}`)
+      //   .trim();
     }
     const min = Math.floor(remainingSeconds / 60);
     const sec = remainingSeconds % 60;
-    return `예상 남은 시간: ${min}분 ${sec}초`;
-  }, [effectiveLocationSearchEstimatedSeconds, locationSearchProgressPercent]);
+    // return t("locationSearchRemainingTimeLong")
+    //   .replace("{minutes}", `${min}`)
+    //   .replace("{seconds}", `${sec}`)
+    //   .trim();
+  }, [
+    effectiveLocationSearchEstimatedSeconds,
+    locationSearchProgressPercent,
+    t,
+  ]);
 
   useEffect(() => {
     if (!isMainInteractionBlocked) return;
@@ -5215,7 +5485,6 @@ export default function HomeScreen() {
                     openToken={mapOpenToken}
                     preparingLocations={visibleLocationPreparing}
                     preparingMessage="Preparing map markers. Please wait..."
-                    onOpenPhotoFromMap={handleOpenPhotoFromMap}
                   />
                 </TouchableOpacity>
 
@@ -5420,7 +5689,6 @@ export default function HomeScreen() {
         >
           <View style={styles.locationSearchModalBackdrop} pointerEvents="auto">
             {/* 2026.06.23 한 달 초과 광고 게이트는 공용 리워드 팝업(RewardGateProvider)으로 대체됨 by yen */}
-
             {locationSearchWorkflowStatus === "search-prompt" ? (
               <LinearGradient
                 colors={["rgba(233,241,255,0.96)", "rgba(245,230,255,0.98)"]}
@@ -5435,14 +5703,14 @@ export default function HomeScreen() {
                   ]}
                 >
                   <Text style={styles.locationSearchModalTitle}>
-                    {`${locationSearchTargetCountLabel}장의 사진을 검색해야 합니다.`}
+                    {locationSearchSearchPromptTitle}
                   </Text>
                   <Text style={styles.locationSearchModalBody}>
-                    {`예상 시간은 약 ${locationSearchEstimatedMinutesLabel}입니다.`}
+                    {locationSearchSearchPromptBody}
                   </Text>
                   {effectiveLocationSearchEstimatedSeconds > 30 ? (
                     <Text style={styles.locationSearchModalHint}>
-                      연,월,시간,장소 조건을 좁혀보세요. 검색 범위가 줄어들어 소요시간을 줄일 수 있습니다.
+                      {locationSearchSearchPromptHint}
                     </Text>
                   ) : null}
                   <View style={styles.locationSearchModalActions}>
@@ -5457,7 +5725,7 @@ export default function HomeScreen() {
                         style={styles.locationSearchPrimaryGradientButton}
                       >
                         <Text style={styles.locationSearchButtonText}>
-                          시작
+                          {t("locationSearchStart")}
                         </Text>
                       </LinearGradient>
                     </TouchableOpacity>
@@ -5472,7 +5740,7 @@ export default function HomeScreen() {
                         style={styles.locationSearchSecondaryGradientButton}
                       >
                         <Text style={styles.locationSearchButtonText}>
-                          나중에
+                          {locationSearchLaterButtonLabel}
                         </Text>
                       </LinearGradient>
                     </TouchableOpacity>
@@ -5495,10 +5763,16 @@ export default function HomeScreen() {
                   ]}
                 >
                   <Text style={styles.locationSearchModalTitle}>
-                    선택한 범위의 사진을 정리하고 있습니다.
+                    {t("locationSearchPreparingTitle")}
                   </Text>
                   <Text style={styles.locationSearchProgressBody}>
-                    {`${locationSearchProgressChecked.toLocaleString()} / ${Math.max(locationSearchProgressTotal, currentSearchTargetCount).toLocaleString()}장 확인 중`}
+                    {t("locationSearchProgressBody").replace(
+                      "{count}",
+                      `${Math.max(
+                        locationSearchProgressTotal,
+                        currentSearchTargetCount,
+                      ).toLocaleString()}`,
+                    )}
                   </Text>
                   <View style={styles.locationSearchProgressTrack}>
                     <View
@@ -5511,13 +5785,16 @@ export default function HomeScreen() {
                     />
                   </View>
                   <Text style={styles.locationSearchProgressPercentText}>
-                    {`진행률 ${locationSearchProgressPercent}%`}
+                    {t("locationSearchProgressPercentLabel").replace(
+                      "{percent}",
+                      `${locationSearchProgressPercent}`,
+                    )}
                   </Text>
                   <Text style={styles.locationSearchProgressSubText}>
                     {locationSearchRemainingLabel}
                   </Text>
                   <Text style={styles.locationSearchProgressSubText}>
-                    {locationSearchPhaseText}
+                    {t(locationSearchPhaseText)}
                   </Text>
                   <TouchableOpacity
                     activeOpacity={0.95}
@@ -5530,7 +5807,7 @@ export default function HomeScreen() {
                       style={styles.locationSearchCancelGradientButton}
                     >
                       <Text style={styles.locationSearchButtonText}>
-                        선택취소
+                        {t("locationSearchCancel")}
                       </Text>
                     </LinearGradient>
                   </TouchableOpacity>
