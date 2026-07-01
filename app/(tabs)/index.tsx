@@ -677,8 +677,8 @@ export default function HomeScreen() {
   const locationSearchTargetCountLabel = useMemo(
     () =>
       locationSearchTargetTotalCount === null
-        ? "30+"
-        : locationSearchTargetTotalCount.toLocaleString(),
+        ? "N+"
+        : `${locationSearchTargetTotalCount.toLocaleString()}+`,
     [locationSearchTargetTotalCount],
   );
 
@@ -1361,6 +1361,15 @@ export default function HomeScreen() {
     setViewerEntryPoint("home");
   }, [stopSlideshow]);
 
+  const pauseSlideshowToDetail = useCallback(() => {
+    slideshowRunTokenRef.current += 1;
+    clearSlideshowTimer();
+    setSlideshowPreparing(false);
+    setSlideshowOn(false);
+    setSlideshowVisible(false);
+    setViewerVisible(true);
+  }, [clearSlideshowTimer]);
+
   /* 2026.04.22 닫기 버튼 동작은 close event를 남겨야 하므로 래퍼 함수를 분리해 추적 일관성을 유지하기 위해 추가 by June */
   const handleCloseSlideshow = useCallback(() => {
     closeSlideshow({ trackClose: true });
@@ -1381,8 +1390,6 @@ export default function HomeScreen() {
   /* 2026.04.22 사진 뷰어 상단 Play 버튼에서 현재 보고 있는 인덱스부터 슬라이드쇼가 시작되도록 전용 핸들러를 추가 by June */
   const handleViewerPlayPress = useCallback(() => {
     const startIndex = viewerIndexRef.current ?? 0;
-    /* 2026.04.22 뷰어와 슬라이드쇼 모달이 겹쳐 보이는 문제를 막기 위해 재생 시작 전 뷰어를 닫도록 처리 by June */
-    setViewerVisible(false);
     void prepareAndStartSlideshow({
       startIndex,
       sourceUris: viewerPhotoUris,
@@ -5867,8 +5874,9 @@ export default function HomeScreen() {
               void resolveViewerDetailUri(nextViewerUri);
             }
           }}
-          showPlayButton={viewerEntryPoint === "home" && !slideshowOn}
-          onPressPlay={handleViewerPlayPress}
+          primaryButtonMode={slideshowOn ? "pause" : "play"}
+          onPressPrimary={slideshowOn ? pauseSlideshowToDetail : handleViewerPlayPress}
+          showCloseButton={!slideshowOn}
           dateText={
             currentViewerPhoto ? fmtDateTime(currentViewerPhoto.takenAt) : ""
           }

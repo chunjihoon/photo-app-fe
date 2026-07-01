@@ -1,4 +1,5 @@
 import { useLanguage } from "@/components/context/LanguageContext";
+import { useSlideshowTime } from "@/components/context/SlideshowTimeContext";
 import { TRANSLATIONS } from "@/constants/Translations";
 import PhotoDetailViewer from "@/components/PhotoDetailViewer";
 import * as amplitude from "@amplitude/analytics-react-native";
@@ -123,11 +124,13 @@ export default function MapView({
   preparingMessage,
 }: Props) {
   const { language } = useLanguage();
+  const { slideshowTime } = useSlideshowTime();
   const [visible, setVisible] = useState(false);
   const [detailVisible, setDetailVisible] = useState(false);
   const [detailUris, setDetailUris] = useState<string[]>([]);
   const [detailIndex, setDetailIndex] = useState(0);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [slideshowOn, setSlideshowOn] = useState(false);
   const [detailItems, setDetailItems] = useState<
     Array<{
       sourceUri: string;
@@ -154,6 +157,68 @@ export default function MapView({
   const hasAutoFitMapRef = useRef(false);
   const lastViewportBoundsRef = useRef<ViewportBounds>(null);
   const lastViewportZoomRef = useRef<number>(0);
+  const slideshowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const slideshowRunTokenRef = useRef(0);
+  const slideshowDelayMs = useMemo(() => {
+    const delayMs = Number(slideshowTime);
+    if (!Number.isFinite(delayMs) || delayMs <= 0) return 3000;
+    return Math.max(1000, Math.round(delayMs));
+  }, [slideshowTime]);
+
+  const clearSlideshowTimer = useCallback(() => {
+    if (slideshowTimerRef.current !== null) {
+      clearTimeout(slideshowTimerRef.current);
+      slideshowTimerRef.current = null;
+    }
+  }, []);
+
+  const closeDetailSlideshow = useCallback(() => {
+    slideshowRunTokenRef.current += 1;
+    clearSlideshowTimer();
+    setSlideshowOn(false);
+    setDetailVisible(false);
+  }, [clearSlideshowTimer]);
+
+  const pauseDetailSlideshow = useCallback(() => {
+    slideshowRunTokenRef.current += 1;
+    clearSlideshowTimer();
+    setSlideshowOn(false);
+  }, [clearSlideshowTimer]);
+
+  const scheduleNextDetailSlide = useCallback(
+    (token: number) => {
+      clearSlideshowTimer();
+      slideshowTimerRef.current = setTimeout(() => {
+        if (token !== slideshowRunTokenRef.current) return;
+        const total = detailUris.length;
+        if (total <= 0) {
+          closeDetailSlideshow();
+          return;
+        }
+
+        setDetailIndex((prev) => {
+          const next = prev + 1;
+          if (next >= total) {
+            closeDetailSlideshow();
+            return prev;
+          }
+
+          scheduleNextDetailSlide(token);
+          return next;
+        });
+      }, slideshowDelayMs);
+    },
+    [clearSlideshowTimer, closeDetailSlideshow, detailUris.length, slideshowDelayMs],
+  );
+
+  const startDetailSlideshow = useCallback(() => {
+    if (detailUris.length <= 0) return;
+    slideshowRunTokenRef.current += 1;
+    const token = slideshowRunTokenRef.current;
+    clearSlideshowTimer();
+    setSlideshowOn(true);
+    scheduleNextDetailSlide(token);
+  }, [clearSlideshowTimer, detailUris.length, scheduleNextDetailSlide]);
 
   const isFallbackMarker = (markerUri: string | undefined) =>
     !markerUri || markerUri === FALLBACK_MARKER_URI;
@@ -1075,11 +1140,24 @@ export default function MapView({
     ]);
   };
 
+  const resetMapViewportState = () => {
+    setViewportBounds(null);
+    setMapZoom(0);
+    lastViewportBoundsRef.current = null;
+    lastViewportZoomRef.current = 0;
+  };
+
   const performOpenMap = () => {
     setLoading(true);
     setThumbnailLoading(false);
     setCoordinatesReady(false);
     setWebViewLoaded(false);
+    setDetailVisible(false);
+    setDetailLoading(false);
+    setDetailUris([]);
+    setDetailIndex(0);
+    setDetailItems([]);
+    resetMapViewportState();
     hasAutoFitMapRef.current = false;
     setVisible(true);
     /* 2026.06.23 지도가 열린 직후 부모가 리워드 팝업을 지도 위에 띄울 수 있도록 통지 by yen */
@@ -1096,6 +1174,13 @@ export default function MapView({
     if (!openToken) return;
     performOpenMap();
   }, [openToken]);
+
+  useEffect(() => {
+    return () => {
+      slideshowRunTokenRef.current += 1;
+      clearSlideshowTimer();
+    };
+  }, [clearSlideshowTimer]);
 
   return (
     <View>
@@ -1143,7 +1228,12 @@ export default function MapView({
           ) : null}
           <View style={styles.closeButton}>
             <TouchableOpacity
-              onPress={() => setVisible(false)}
+              onPress={() => {
+                slideshowRunTokenRef.current += 1;
+                clearSlideshowTimer();
+                setSlideshowOn(false);
+                setVisible(false);
+              }}
               style={{
                 width: 44,
                 height: 44,
@@ -1186,8 +1276,18 @@ export default function MapView({
               const safeIndex = Math.max(0, Math.min(index, detailUris.length - 1));
               setDetailIndex(safeIndex);
             }}
-            onRequestClose={() => setDetailVisible(false)}
-            showPlayButton={false}
+            onRequestClose={() => {
+              slideshowRunTokenRef.current += 1;
+              clearSlideshowTimer();
+              setSlideshowOn(false);
+              setDetailVisible(false);
+            }}
+            primaryButtonMode={slideshowOn ? "pause" : "play"}
+            onPressPrimary={slideshowOn ? pauseDetailSlideshow : startDetailSlideshow}
+            showCloseButton={!slideshowOn}
+            backgroundColor="transparent"
+            animationType="fade"
+            presentationStyle="overFullScreen"
             dateText={fmtDateTime(detailItems[detailIndex]?.takenAt ?? null)}
             locationText={
               [detailItems[detailIndex]?.city, detailItems[detailIndex]?.country]
