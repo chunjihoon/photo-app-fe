@@ -1,7 +1,9 @@
 import Constants from "expo-constants";
 
 const appVersion = Constants.expoConfig?.version ?? "1.0.0";
-const buildVersion = Constants.nativeBuildVersion;
+const buildVersion =
+  Constants.nativeBuildVersion ??
+  Constants.expoConfig?.ios?.buildNumber;
 const appVersionLabel = buildVersion
   ? `${appVersion} (${buildVersion})`
   : appVersion;
